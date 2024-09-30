@@ -1,18 +1,20 @@
-import streamlit as st 
-import pandas as pd
-import sqlite3
-from datetime import datetime
-import time
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import streamlit as st # Biblioteca para criar aplicação web interativas
+import pandas as pd # Biblioteca para análise e manipulação de dados
+import sqlite3 # Biblioteca do banco de dados SQLite3
+from datetime import datetime # Biblioteca para manipulação de datas e horas
+import time # Biblioteca para tempo de espera de uma aplicação
+import smtplib # Biblioteca de interfaca de emails usando o protocolo SMTP
+from email.mime.text import MIMEText # Módulo da biblioteca email para criar mensagens de email com conteúdo de texto
+from email.mime.multipart import MIMEMultipart # Módulo da biblioteca email para criar mensagens de email que contem multiplos conteudos, como texto, HTML e anexos
 import re
+from fpdf import FPDF # Gerar e fazer download de um arquivo em PDF do relatorio de chaves
+from io import BytesIO # Biblioteca para manipular dados em binário para memoria
 
 # Configurações do e-mail
 EMAIL_HOST = 'smtp.office365.com'
 EMAIL_PORT = 587
 EMAIL_USER = 'deivison.dias@brisamarshopping.com.br'  # Aqui é o email responsável por enviar as mensagens aos admnistradores
-EMAIL_PASS = 'Brisamar#2302@'  #senha do email
+EMAIL_PASS = 'Mendes#2302@'  #senha do email
 
 # Lista de e-mails dos administradores
 ADMIN_EMAILS = ['deivison.dias@brisamarshopping.com.br']
@@ -33,7 +35,7 @@ def create_table():
     conn = connect_db()
     cursor = conn.cursor()
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS solicitacoes (
+        CREATE TABLE IF NOT EXISTS solicitacoes_chaves (
         id INTEGER PRIMARY KEY,
         data_solicitacao TEXT,
         data_retirada TEXT,
@@ -93,7 +95,7 @@ def add_request(data_retirada, data_entrega, setor_solicitante, email, chave):
     conn = connect_db()
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT INTO solicitacoes (data_solicitacao, data_retirada, data_entrega, setor_solicitante, chave, status, email_solicitante)
+        INSERT INTO solicitacoes_chaves (data_solicitacao, data_retirada, data_entrega, setor_solicitante, chave, status, email_solicitante)
         VALUES (?, ?, ?, ?, ?, ?, ?)
     ''', (datetime.now().strftime("%d-%m-%Y %H:%M:%S"), data_retirada, data_entrega, setor_solicitante, chave, 'Pendente', email))
     conn.commit()
@@ -138,7 +140,8 @@ def add_request(data_retirada, data_entrega, setor_solicitante, email, chave):
 # Função para obter solicitações
 def get_requests():
     conn = connect_db()
-    df = pd.read_sql_query("SELECT * FROM solicitacoes", conn)
+    df = pd.read_sql_query("SELECT * FROM solicitacoes_chaves", conn)
+    conn.commit()
     conn.close()
     return df
 
@@ -147,7 +150,7 @@ def register_return(index, recebedor):
     conn = connect_db()
     cursor = conn.cursor()
     cursor.execute('''
-        UPDATE solicitacoes
+        UPDATE solicitacoes_chaves
         SET status = 'Devolvida', nome_recebedor = ?
         WHERE id = ?
     ''', (recebedor, index))
@@ -169,80 +172,36 @@ def check_and_notify_delays():
     conn = connect_db()
     cursor = conn.cursor()
 
-    # Obtem a data do último email enviado
-    cursor.execute("SELECT data_ultimo_email FROM solicitacoes")
-    result = cursor.fetchone()
-
-    if result and isinstance(result[0], str):
-        data_ultimo_email = result[0]
-    else:
-        data_ultimo_email = None
-
-    # Selecionar todas as chaves liberadas
-    cursor.execute("SELECT * FROM solicitacoes WHERE status = 'Liberada'")
+    cursor.execute("SELECT id, data_entrega, atraso, data_ultimo_email FROM solicitacoes_chaves WHERE status = 'Liberada'")
     rows = cursor.fetchall()
     
     for row in rows:
-        index = row[0] # Assume que o ID da da solicitação é primeira coluna
-        data_entrega = datetime.strptime(row[3],"%d-%m-%Y").date() # Data da entrega
+        index = row[0] # Assume que o ID da solicitação é primeira coluna
+        data_entrega = datetime.strptime(row[1],"%d-%m-%Y").date() # Data da entrega
+        atraso_atual = (hoje - data_entrega).days
 
-        if data_entrega < hoje:
-                # Calcular os dias de atraso
-                atraso_atual = (hoje - data_entrega).days
+        cursor.execute("SELECT data_ultimo_email FROM solicitacoes_chaves WHERE id = ?", (index,))
+        data_ultimo_email = cursor.fetchone()[0]
+        
+        # Verificar se o último e-mail foi enviado
+        if data_ultimo_email is None or datetime.strptime(data_ultimo_email, "%d-%m-%Y").date() < hoje:
+            if atraso_atual > 0: # Enviar somente se houver atraso
+                cursor.execute("UPDATE solicitacoes_chaves SET Atraso = ?, data_ultimo_email = ? WHERE id = ?", (atraso_atual, hoje.strftime("%d-%m-%Y"), index))
+                # Enviar notificação de atraso
+                email = row[7] # Assume que o email do solicitante está na sétima coluna 
+                subject = "Aviso de Atraso na Devolução de Chave"
+                body = f"""
+                Olá,
 
-                # Verificar o atraso atual no banco de dados
-                cursor.execute("SELECT atraso, 'data_ultimo_email' FROM solicitacoes WHERE ID = ?", (index,))
-                atraso_atual_db, data_ultimo_email_db = cursor.fetchone()
+                Notamos que a chave que você solicitou deveria ter sido devolvida em {data_entrega.strftime("%d-%m-%Y")}.
+                Atualmente, a devolução está {atraso_atual} dias em atraso.
 
-                if atraso_atual_db is None or int(atraso_atual_db) < atraso_atual:
-                    # Atualizar a coluna "Atraso"
-                    cursor.execute("UPDATE solicitacoes SET Atraso = ? WHERE ID = ?", (atraso_atual, index))
+                Solicitamos que a devolução da chave seja feita o mais breve possível.
 
-                    # Verificar a data do último email
-                    if data_ultimo_email_db and isinstance (data_ultimo_email_db, str):          
-                        try:
-                            last_email_date = datetime.strptime(data_ultimo_email_db, "%d-%m-%Y").date()
-                            if last_email_date < hoje:
-                                # Enviar notificação de atraso
-                                email = row[7] # Assume que o email do solicitante está na sétima coluna 
-                                subject = "Aviso de Atraso na Devolução de Chave"
-                                body = f"""
-                                Olá,
-
-                                Notamos que a chave que você solicitou deveria ter sido devolvida em {data_entrega.strftime("%d-%m-%Y")}.
-                                Atualmente, a devolução está {atraso_atual} dias em atraso.
-
-                                Solicitamos que a devolução da chave seja feita o mais breve possível.
-
-                                Atenciosamente,
-                                SOSC - Sistema Operacional de Solicitação de Chaves
-                                """
-                                send_email(email, subject, body)
-
-                                # Atualizar a data do último e-mail
-                                cursor.execute("UPDATE solicitacoes SET 'data_ultimo_email' = ? WHERE ID = ?", (hoje.strftime("%d-%m-%Y"), index))
-                        except ValueError:
-                            # Caso a data não seja válida:
-                            st.warning(f"Data do último e-mail inválida para a solicitação {index}.")
-                    else:
-                        # Enviar notificação se não houver registro de e-mail
-                        email = row[7]  # Assume que o email do solicitante está na sétima coluna
-                        subject = "Aviso de Atraso na Devolução de Chave"
-                        body = f"""
-                        Olá,
-
-                        Notamos que a chave que você solicitou deveria ter sido devolvida em {data_entrega.strftime("%d-%m-%Y")}.
-                        Atualmente, a devolução está {atraso_atual} dias em atraso.
-
-                        Solicitamos que a devolução da chave seja feita o mais breve possível.
-
-                        Atenciosamente,
-                        SOSC - Sistema Operacional de Solicitação de Chaves
-                        """
-                        send_email(email, subject, body)
-
-                        # Atualizar a data do último e-mail
-                        cursor.execute("UPDATE solicitacoes SET data_ultimo_email = ? WHERE ID = ?", (hoje.strftime("%d-%m-%Y"), index))
+                Atenciosamente,
+                SOSC - Sistema Operacional de Solicitação de Chaves
+                """
+                send_email(email, subject, body)
     conn.commit()
     conn.close()
 
@@ -251,13 +210,13 @@ def update_status_aprovado(index, status, nome_aprovador):
     conn = connect_db()
     cursor = conn.cursor()
     cursor.execute('''
-        UPDATE solicitacoes
+        UPDATE solicitacoes_chaves
         SET status = ?, nome_aprovador = ?
         WHERE id = ?     
     ''', (status, nome_aprovador, index))
 
     # Obtém o email do solicitante
-    cursor.execute("SELECT email_solicitante FROM solicitacoes WHERE id = ?", (index,))
+    cursor.execute("SELECT email_solicitante FROM solicitacoes_chaves WHERE id = ?", (index,))
     result = cursor.fetchone()
 
     # Verifica se algum resultado foi retornado
@@ -265,9 +224,6 @@ def update_status_aprovado(index, status, nome_aprovador):
         email = result[0] # Pega o primeiro item da tupla
     else:
         email = None # ou uma string padrão, se preferir
-
-    conn.commit()
-    conn.close()
 
     subject = "Atualização sobre sua Solicitação de Chave"
     body = f"""
@@ -283,19 +239,21 @@ def update_status_aprovado(index, status, nome_aprovador):
     SOSC - Sistema Operacional de Solicitação de Chaves
     """
     send_email(email, subject, body)
+    
+    conn.commit()
 
 # Função para atualizar o status da solicitação NEGADA
 def update_status_negado(index, status, nome_aprovador):
     conn = connect_db()
     cursor = conn.cursor()
     cursor.execute('''
-        UPDATE solicitacoes
+        UPDATE solicitacoes_chaves
         SET status = ?, nome_aprovador = ?
         WHERE id = ?
     ''', (status, nome_aprovador, index))
 
     # Obtém o email do solicitante
-    cursor.execute("SELECT email_solicitante FROM solicitacoes WHERE id = ?", (index,))
+    cursor.execute("SELECT email_solicitante FROM solicitacoes_chaves WHERE id = ?", (index,))
     result = cursor.fetchone()
 
     # Verifica se algum resultado foi retornado
@@ -304,8 +262,6 @@ def update_status_negado(index, status, nome_aprovador):
     else:
         email = None # ou uma string padrão, se preferir
 
-    conn.commit()
-    conn.close()
 
     subject = "Atualização sobre sua Solicitação de Chave"
     body = f"""
@@ -322,12 +278,15 @@ def update_status_negado(index, status, nome_aprovador):
     """
     send_email(email, subject, body)
 
+    conn.commit()
+    conn.close()
+
 # Função para registrar a devolução da chave
 def register_return(index, recebedor):
     conn = connect_db()
     cursor = conn.cursor()
     # Aqui faremos o cálculo para calcular a coluna atraso
-    cursor.execute("SELECT data_entrega FROM solicitacoes WHERE id = ?", (index,))
+    cursor.execute("SELECT data_entrega FROM solicitacoes_chaves WHERE id = ?", (index,))
     data_entrega = cursor.fetchone() # Aqui ele retorna a data da entrega
 
     if data_entrega and data_entrega[0]: # Verifica se a data da entrega não é None
@@ -342,7 +301,7 @@ def register_return(index, recebedor):
     else:
         atraso = 0 # Se a data de entrega for None insira o zero
     cursor.execute('''
-        UPDATE solicitacoes
+        UPDATE solicitacoes_chaves
         SET status = 'Devolvida', nome_recebedor = ?, atraso = ?
         WHERE id = ?
     ''', (recebedor, atraso, index))
@@ -380,6 +339,83 @@ def login_screen_devolver_chaves():
         else:
             st.error("Senha incorreta. Tente novamente.")
 
+def fetch_data_from_db():
+    # Função para pegar todos os dados do banco
+    conn = connect_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM solicitacoes_chaves")
+    data = cursor.fetchall()
+    conn.close()
+    return data
+
+def extract_name_from_email(email):
+    if email and '@' in email:
+        return email.split('@')[0]
+    return email # Retorna o email original se não encontrar o @
+
+def safe_str(value):
+    return "" if value is None else str(value)
+
+
+def generate_pdf(data):
+    # Função para gerar o PDF
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    # Configurando o título do PDF
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(200, 10, "Relatório Solicitações de Chaves", ln=True, align="C")
+    pdf.ln(10)
+
+    # Configurando a tabela de dados 
+    pdf.set_font("Arial", size=8)
+    col_widths = {
+        "ID": pdf.w / 20.0,
+        "Solicitação": pdf.w / 8.0,
+        "Retirada": pdf.w / 13.0,
+        "Entrega": pdf.w / 13.0,
+        "Setor": pdf.w / 12.0, 
+        "Chave": pdf.w / 13.0,
+        "Status": pdf.w / 14.0,
+        "E-mail": pdf.w / 7.0,
+        "Aprovador": pdf.w / 14.0,
+        "Recebedor": pdf.w / 14.0,
+        "Atraso": pdf.w / 20.0
+    }
+    row_height = pdf.font_size * 2.0
+
+    # Cabeçalhos da tabela
+    headers = ["ID", "Solicitação", "Retirada", "Entrega", "Setor", "Chave", "Status", "E-mail", "Aprovador", "Recebedor", "Atraso"]
+    for header in headers:
+        pdf.cell(col_widths[header], row_height, header, border=1, align='C')
+        
+
+    pdf.ln(row_height) # Linha nova 
+
+    # Preenchendo as linhas com os dados
+    for row in data:
+        pdf.cell(col_widths["ID"], row_height, str(row[0]), border=1, align='C') #ID 
+        pdf.cell(col_widths["Solicitação"], row_height, row[1], border=1, align='C') # Data Solicitação
+        pdf.cell(col_widths["Retirada"], row_height, row[2], border=1, align='c') # Data Retirada
+        pdf.cell(col_widths["Entrega"], row_height, row[3], border=1, align='C') # Data Entrega
+        pdf.cell(col_widths["Setor"], row_height, row[4], border=1, align='C') # Setor Solicitante 
+        pdf.cell(col_widths["Chave"], row_height, row[5], border=1, align='C') # Chave
+        pdf.cell(col_widths["Status"], row_height, row[6], border=1, align='c') # Status
+        pdf.cell(col_widths["E-mail"], row_height, extract_name_from_email(row[7]), border=1, align='C') # E-mail Solicitante
+        pdf.cell(col_widths["Aprovador"], row_height, safe_str(row[8]), border=1, align='C') # Nome Aprovador
+        pdf.cell(col_widths["Recebedor"], row_height, safe_str(row[9]), border=1, align='C') # Nome Recebedor
+        pdf.cell(col_widths["Atraso"], row_height, safe_str(row[10]), border=1) # Atraso
+        pdf.ln()
+
+    # Retorna o PDF gerado em memoria
+    pdf_output = BytesIO()
+    # Salvar o PDF no objeto BytesIO como bytes
+    pdf_bytes = pdf.output(dest='S').encode('latin1') #Retorna o PDF como Bytes
+    pdf_output.write(pdf_bytes)
+    pdf_output.seek(0)
+    return pdf_output
+
 
 
 # Tela Principal
@@ -401,10 +437,6 @@ def main():
         st.session_state["logged_in"] = False
 
     st.title("Sistema Operacional de Solicitação de Chaves")
-    
-
-    # Caminho do arquivo Excel
-    excel_file = "solicitacoes_chaves.xlsx"
 
     # Inicialização das chaves do st.session_state
     if 'email' not in st.session_state:
@@ -495,6 +527,16 @@ def main():
         else:
             st.header("Liberação")
 
+            # Adicionar o botão para download do banco de dados
+            data = fetch_data_from_db()
+            pdf_output = generate_pdf(data)
+            st.download_button(
+                label="Exportar Banco de Dados em PDF",
+                data=pdf_output,
+                file_name="relatorio_solicitacoes_chaves.pdf",
+                mime="application/pdf", key='download_tab2'
+            )
+
             # Obter solicitações pendentes
             pending_requests = get_requests()
             pending_requests = pending_requests[pending_requests['status'] == 'Pendente']
@@ -546,6 +588,16 @@ def main():
             login_screen_devolver_chaves()
         else:
             st.header("Devolução de Chaves")
+
+            # Adicionar o botão para download do banco de dados
+            data = fetch_data_from_db()
+            pdf_output = generate_pdf(data)
+            st.download_button(
+                label="Exportar Banco de Dados em PDF",
+                data=pdf_output,
+                file_name="relatorio_solicitacoes_chaves.pdf",
+                mime="application/pdf", key='download_tab3'
+            )
 
             # Obter solicitações liberadas na aba devolução das chaves
             df_return = get_requests() # Essa função retorna todas as colicitações
