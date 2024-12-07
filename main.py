@@ -173,6 +173,7 @@ def check_and_notify_delays():
     cursor = conn.cursor()
 
     cursor.execute("SELECT id, data_entrega, atraso, data_ultimo_email FROM solicitacoes_chaves WHERE status = 'Liberada'")
+    conn.commit()
     rows = cursor.fetchall()
     
     for row in rows:
@@ -182,12 +183,16 @@ def check_and_notify_delays():
 
         cursor.execute("SELECT data_ultimo_email FROM solicitacoes_chaves WHERE id = ?", (index,))
         data_ultimo_email = cursor.fetchone()[0]
+        conn.commit()
         
         # Verificar se o último e-mail foi enviado
         if data_ultimo_email is None or datetime.strptime(data_ultimo_email, "%d-%m-%Y").date() < hoje:
             if atraso_atual > 0: # Enviar somente se houver atraso
+                conn = connect_db()
+                cursor = conn.cursor()
                 cursor.execute("UPDATE solicitacoes_chaves SET Atraso = ?, data_ultimo_email = ? WHERE id = ?", (atraso_atual, hoje.strftime("%d-%m-%Y"), index))
                 # Enviar notificação de atraso
+                print (row)
                 email = row[7] # Assume que o email do solicitante está na sétima coluna 
                 subject = "Aviso de Atraso na Devolução de Chave"
                 body = f"""
@@ -202,8 +207,8 @@ def check_and_notify_delays():
                 SOSC - Sistema Operacional de Solicitação de Chaves
                 """
                 send_email(email, subject, body)
+                conn.commit()
     conn.commit()
-    conn.close()
 
 # Função para atualizar o status APROVADO
 def update_status_aprovado(index, status, nome_aprovador):
